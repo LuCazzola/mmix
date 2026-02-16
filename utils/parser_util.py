@@ -82,9 +82,6 @@ def add_model_options(parser):
                        help="Number of layers.")
     group.add_argument("--latent_dim", default=128, type=int,
                        help="Transformer/GRU width.")
-    group.add_argument("--cond_mask_prob", default=.1, type=float,
-                       help="The probability of masking the condition during training."
-                            " For classifier-free guidance learning.")
     group.add_argument("--lambda_fs", default=0.0, type=float, help="Foot contact loss.")
     group.add_argument("--lambda_geo", default=0.0, type=float, help="Foot contact loss.")
     group.add_argument("--t5_name", default='t5-base', choices=["t5-small", "t5-base", "t5-large", "t5-3b", "t5-11b",
@@ -97,11 +94,23 @@ def add_model_options(parser):
                        help="If passed, joints names wont be added to features")
     group.add_argument("--value_emb", action='store_true',
                        help="If passed, graph multihead attention learns GRPE value embeddings")
-    # ADDED
+    # NEW
     group.add_argument("--control", action='store_true',
                        help="If passed, will enable controlnet mechanism")
     group.add_argument("--pretrained_base_model_path", default='./save/all_model_dataset_truebones_bs_16_latentdim_128/model000459999.pt', type=str,
                        help="Path to pretrained AnyTop model to be used as the frozen backbone of MMix. Defaults to the model pre-trained on the full Truebones dataset.")
+    group.add_argument("--control_mode", default='residual', choices=['residual', 'adain', 'gram'], type=str,
+                       help="How the control signal is injected back to the base model.")
+    ## ControlNet related options
+    group.add_argument("--t_mask_drop", default=0.0, type=float,
+                       help="The probability of masking each timestep in the control signal during training.")
+    group.add_argument("--j_mask_drop", default=0.0, type=float,
+                       help="The probability of masking each joint in the control signal during training.")
+    ## CFG
+    group.add_argument("--cond_mask_prob", default=0.0, type=float,
+                       help="The probability of masking the condition during training. For classifier-free guidance learning.")
+    group.add_argument("--guidance_scale", default=1.0, type=float,
+                        help="scale for classifier-free guidance during training. Only relevant if cond_mask_prob > 0 and control is enabled.")
 
 def add_data_options(parser):
     group = parser.add_argument_group('dataset')
@@ -137,9 +146,9 @@ def add_training_options(parser):
                        help="If -1, will use all samples in the specified split.")
     group.add_argument("--log_interval", default=50, type=int,
                        help="Log losses each N steps")
-    group.add_argument("--save_interval", default=10_000, type=int,
+    group.add_argument("--save_interval", default=1_000, type=int,
                        help="Save checkpoints and run evaluation each N steps")
-    group.add_argument("--num_steps", default=600_000, type=int,
+    group.add_argument("--num_steps", default=100_000, type=int,
                        help="Training will stop after the specified number of steps.")
     group.add_argument("--num_frames", default=120, type=int,
                        help="Limit for the maximal number of frames. In HumanML3D and KIT this field is ignored.")
@@ -176,6 +185,7 @@ def add_sampling_options(parser):
     group.add_argument("--cond_path", default='', type=str,
                        help="provide cond.py path in case you wish to generate motion for skeleton not included in Truebones dataset.")
     
+
 def add_generate_options(parser):
     group = parser.add_argument_group('generate')
     group.add_argument("--motion_length", default=6.0, type=float,
@@ -189,10 +199,18 @@ def add_mix_options(parser):
     group.add_argument("--motion_length", default=6.0, type=float,
                        help="The length of the sampled motion [in seconds]. "
                             "Maximum is 9.8 for HumanML3D (text-to-motion), and 2.0 for HumanAct12 (action-to-motion)")
-    group.add_argument("--object_type", default=['Flamingo'], type=str, nargs='+',
+    group.add_argument("--object_type", default=[], type=str, nargs='+',
                        help="An object type to be generated. If empty, will generate flamingo :).")
+    group.add_argument("--src_mix", type=str,
+                       default='./dataset/truebones/zoo/truebones_processed/motions/Flamingo_Flamingo_OneLEgBEnt_353.npy', 
+                       help="Path to the source motion npy file for mixing. If empty, will sample randomly from the given object_type's motions.")
+    group.add_argument("--tgt_mix", type=str,
+                        default='./dataset/truebones/zoo/truebones_processed/motions/Flamingo_Flamingo_BendIdle_352.npy',
+                       help="Path to the target motion npy file for mixing. If empty, will sample randomly from the given object_type's motions.")
     group.add_argument("--alpha", default=[0.0, 0.5, 1.0], type=float, nargs='+',
                        help="Alpha values for mixing motions. Mixing will be performed for each alpha specified in the list.")
+    group.add_argument("--mix_mode", default='lerp', choices=['lerp', 'sum', 'diff', 'max', 'min'], type=str,
+                       help="Mode of mixing the control signals. Only relevant for MMix.")
 
 def add_dift_options(parser):
     # bvhs_dir, sample_bvh, face_joints, save_dir=None, tpos_bvh=None

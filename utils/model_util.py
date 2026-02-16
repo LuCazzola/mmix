@@ -8,7 +8,7 @@ from diffusion.respace import SpacedDiffusion, space_timesteps
 
 
 def load_model(model, state_dict):
-    
+    """ Loads model weights """
     if isinstance(model, MMix):
         expected_missing_keys = ['base_model.']
     else:
@@ -19,17 +19,18 @@ def load_model(model, state_dict):
 
 
 def create_model_and_diffusion_general_skeleton(args):
-    # Init. AnyTop base model
+    """ Creates the model and diffusion process based on the provided arguments. """
     model = AnyTop(**get_gmdm_args(args))
     if args.control:
         print("Wrapping with [MMix] controlnet...")
         load_model(model, torch.load(args.pretrained_base_model_path, map_location='cpu'))
-        model = MMix(base_model=model)
+        model = MMix(base_model=model, **get_mmix_args(args))
 
     diffusion = create_gaussian_diffusion(args)
     return model, diffusion
 
 def get_gmdm_args(args):
+    """ AnyTop args formatting. """
     t5_model_dim = {
         "t5-small": 512,
         "t5-base": 768,
@@ -57,7 +58,16 @@ def get_gmdm_args(args):
             'cond_mask_prob': args.cond_mask_prob, 'max_joints': max_joints, 
             'feature_len':feature_len,  'skip_t5': args.skip_t5, 'value_emb': args.value_emb, 'root_input_feats': 13}
 
+def get_mmix_args(args):
+    """ MMix args formatting. """
+    return {
+        'cond_mode': 'motion', 'control_mode': args.control_mode,
+        'cond_mask_prob': args.cond_mask_prob, 'guidance_scale': args.guidance_scale,
+        't_mask_drop': args.t_mask_drop, 'j_mask_drop': args.j_mask_drop
+    }
+
 def create_gaussian_diffusion(args):
+    """ Creates Gaussian diffusion """
     # default params
     predict_xstart = True  # we always predict x_start (a.k.a. x0), that's our deal!
     steps = 100

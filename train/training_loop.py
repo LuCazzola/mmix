@@ -149,7 +149,7 @@ class TrainLoop:
                     for k,v in logger.get_current().dumpkvs().items():
                         if k == 'loss':
                             print('step[{}]: loss[{:0.5f}]'.format(self.total_step(), v))
-                        if k in ['step', 'samples'] or '_q' in k:
+                        if k in ['step', 'samples']:
                             continue
                         else:
                             self.train_platform.report_scalar(name=k, value=v, iteration=self.total_step(), group_name='Loss')

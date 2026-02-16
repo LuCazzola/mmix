@@ -16,7 +16,7 @@ from diffusion.nn import mean_flat, sum_flat
 from diffusion.losses import normal_kl, discretized_gaussian_log_likelihood, geodesic_distance
 from utils.rotation_conversions import rotation_6d_to_matrix_safe
 
-from model.mmix import MMix
+from model.mmix import MMix, MixConfig
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, scale_betas=1.):
     """
@@ -1527,13 +1527,12 @@ class GaussianDiffusion:
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            
             if isinstance(model.model, MMix):
                 # add MMix training args forward
-                model_kwargs["x_control"] = x_start.unsqueeze(1) # add x_start clean motion as control signal for MMix
-                model_kwargs["y_control"] = model_kwargs["y"] # the y stays the same
-                model_kwargs["alpha"] = 0.0 # during training this is unused, set 0.0 for clarity
-            
+                model_kwargs['control'] = MixConfig(
+                    x = x_start.unsqueeze(1), # add x_start clean motion as control signal for MMix
+                    y = model_kwargs['y'], # the y stays the same
+                )
             # AnyTop forward
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 

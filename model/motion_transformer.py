@@ -160,8 +160,10 @@ class GraphMotionDecoder(nn.TransformerDecoder):
                 edge_value_emb = self.edge_value_emb
                 topology_value_emb = self.topology_value_emb
             output = mod(
-                    output, timesteps_embs, topology_rel, edge_rel, self.edge_key_emb, self.edge_query_emb, edge_value_emb, self.topology_key_emb, self.topology_query_emb, topology_value_emb, spatial_mask, temporal_mask, 
-                    tgt_key_padding_mask, memory_key_padding_mask, y)
+                    output, timesteps_embs, topology_rel, edge_rel,
+                    self.edge_key_emb, self.edge_query_emb, edge_value_emb, self.topology_key_emb, self.topology_query_emb, topology_value_emb,
+                    spatial_mask, temporal_mask, tgt_key_padding_mask, memory_key_padding_mask, y
+                )
             if layer_ind in get_layer_activation:
                 activations[layer_ind] = output.clone()
         if self.norm is not None:

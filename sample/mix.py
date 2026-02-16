@@ -24,6 +24,8 @@ from InverseKinematics import animation_from_positions
 from data_loaders.truebones.truebones_utils.get_opt import get_opt
 from itertools import chain
 
+from model.mmix import MixConfig
+
 from einops import rearrange
 
 def main(args = None, cond_dict = None):
@@ -43,13 +45,12 @@ def main(args = None, cond_dict = None):
     niter = os.path.basename(args.model_path).replace('model', '').replace('.pt', '')
     fps = opt.fps
     dist_util.setup_dist(args.device)
-    object_types = args.object_type
     if out_path == '':
         out_path = os.path.join(os.path.dirname(args.model_path),
                                 'samples_{}_{}_seed{}'.format(name, niter, args.seed))
     # mkdir outpath
     os.makedirs(out_path, exist_ok=True)
-    args.batch_size = len(object_types) # NOTE Batch == number of provided object_types 
+    args.batch_size = len(args.object_type) # NOTE Batch == number of provided object_types 
 
     print("Creating model and diffusion...")
     model, diffusion = create_model_and_diffusion_general_skeleton(args)
@@ -62,13 +63,14 @@ def main(args = None, cond_dict = None):
     t5_conditioner = T5Conditioner(name=args.t5_name, finetune=False, word_dropout=0.0, normalize_text=False, device='cuda')
     model.to(dist_util.dev())
     model.eval()  # disable random masking
-    src_batch, tgt_batch, filenames =  get_source_target_batch_from_motion_paths(object_types, cond_dict, args.temporal_window, t5_conditioner, max_joints=opt.max_joints)
+    src_batch, tgt_batch, filenames =  get_source_target_batch_from_motion_paths(args, cond_dict, t5_conditioner, max_joints=opt.max_joints)
+    alpha_values = [None] if args.mix_mode != 'lerp' else args.alpha
 
-    for alpha in args.alpha:
+    for alpha in alpha_values:
         # format correctly the batch
-        curr_batch_shape, curr_model_kwargs, curr_filenames = format_batch_given_alpha(src_batch, tgt_batch, alpha, filenames)
+        curr_batch_shape, curr_model_kwargs = format_batch_for_mixing(src_batch, tgt_batch, alpha, args.mix_mode)
         for rep_i in range(args.num_repetitions):
-            print(f'### Sampling [alpha={alpha}, repetitions #{rep_i} of {args.num_repetitions}]')
+            print(f'### Sampling [repetitions #{rep_i} of {args.num_repetitions}]')
             sample = diffusion.p_sample_loop(
                 model,
                 curr_batch_shape,
@@ -96,7 +98,9 @@ def main(args = None, cond_dict = None):
                 global_positions = recover_from_bvh_ric_np(motion)
                 #global_positions, out_anim = recover_from_bvh_rot_np(motion, parents, offsets)
                 #out_anim, _1, _2 = animation_from_positions(positions=global_positions, parents=parents, offsets=offsets, iterations=150)
-                name_pref = f'{object_type}_rep_{rep_i}_alpha_{int(alpha*100):03d}'
+                
+                pfx = f"lerp_{int(alpha*100):03d}" if alpha is not None else args.mix_mode
+                name_pref = f'{pfx}_{object_type}_rep_{rep_i}'
                 existing_npy_files = [filename for filename in os.listdir(out_path) if filename.startswith(name_pref) and filename.endswith('.npy')]
                 existing_mp4_files = [filename for filename in os.listdir(out_path) if filename.startswith(name_pref) and filename.endswith('.mp4')]
                 #existing_bvh_files = [filename for filename in os.listdir(out_path) if filename.startswith(name_pref) and filename.endswith('.bvh')]
@@ -117,6 +121,8 @@ def main(args = None, cond_dict = None):
                 #    BVH.save(pjoin(out_path, bvh_name), out_anim, cond_dict[object_type]['joints_names'])
                 
                 # .json
+                
+                curr_filenames = format_filenames(filenames, alpha)
                 with open(pjoin(out_path, json_name), 'w') as f:
                     json.dump({
                         'name': name_pref,
@@ -124,10 +130,17 @@ def main(args = None, cond_dict = None):
                         'source_control': curr_filenames[i][0],
                         'target_control': curr_filenames[i][1],
                         'alpha': alpha,
+                        'mix_mode': args.mix_mode,
                     }, f, indent=4)
                 
                 print(f"repetition #{rep_i} of {args.num_repetitions} ,created motion: {npy_name}")
 
+def format_filenames(filenames, alpha):
+    if alpha == 0.0:
+        return [(f[0], None) for f in filenames]
+    elif alpha == 1.0:
+        return [(None, f[1]) for f in filenames]
+    return filenames
 
 def encode_joints_names(joints_names, t5_conditioner): # joints names should be padded with None to be of max_len 
         names_tokens = t5_conditioner.tokenize(joints_names)
@@ -185,69 +198,77 @@ def create_sample_in_batch(motion, object_type, cond_dict_for_object, temporal_w
     batch.append(max_joints)
     return batch
 
-def get_source_target_batch_from_motion_paths(obj_types, cond_dict, temporal_window, t5_conditioner, max_joints):
+def get_source_target_batch_from_motion_paths(args, cond_dict, t5_conditioner, max_joints):
     
-    src_batch, tgt_batch, control_samples = list(), list(), list()
-    for object_type in obj_types:
+    if len(args.object_type) > 0:
+        print("Sampling source and target motions for object types: ", args.object_type)
+        src_batch, tgt_batch, control_samples = [], [], []
+        for object_type in args.object_type:
+            cond_dict_for_object = cond_dict[object_type]
+            # sample and load
+            motion_paths, motion_files = pick_pair_from_object_id(object_type)
+            src_motion, tgt_motion = np.load(motion_paths[0]), np.load(motion_paths[1])
+            # Build batch list element for collate
+            src_batch.append(create_sample_in_batch(src_motion, object_type, cond_dict_for_object, args.temporal_window, t5_conditioner, max_joints))
+            tgt_batch.append(create_sample_in_batch(tgt_motion, object_type, cond_dict_for_object, args.temporal_window, t5_conditioner, max_joints))
+            # store sampled sources aside
+            control_samples.append([f.split('.npy')[0] for f in motion_files])
+    
+    elif args.src_mix and args.tgt_mix:
+        print(f"Using provided source and target motion paths for mixing:\nSource: {args.src_mix}\nTarget: {args.tgt_mix}")
+        src_motion = np.load(args.src_mix)
+        tgt_motion = np.load(args.tgt_mix)
+        object_type = os.path.basename(args.src_mix).split('_')[0] # object type from filename convention
         cond_dict_for_object = cond_dict[object_type]
-        # sample and load
-        motion_paths, motion_files = pick_pair_from_object_id(object_type)
-        src_motion, tgt_motion = np.load(motion_paths[0]), np.load(motion_paths[1])
-        # Build batch list element for collate
-        src_sample = src_batch.append(create_sample_in_batch(src_motion, object_type, cond_dict_for_object, temporal_window, t5_conditioner, max_joints))
-        tgt_sample = tgt_batch.append(create_sample_in_batch(tgt_motion, object_type, cond_dict_for_object, temporal_window, t5_conditioner, max_joints))
-        # store sampled sources aside
-        control_samples.append([f.split('.npy')[0] for f in motion_files])
+        src_sample = create_sample_in_batch(src_motion, object_type, cond_dict_for_object, args.temporal_window, t5_conditioner, max_joints)
+        tgt_sample = create_sample_in_batch(tgt_motion, object_type, cond_dict_for_object, args.temporal_window, t5_conditioner, max_joints)
+        return [src_sample], [tgt_sample], [(os.path.basename(args.src_mix), os.path.basename(args.tgt_mix))]
+    
+    else:
+        raise ValueError("Both src_mix and tgt_mix paths must be provided together, or both must be left empty to enable random sampling.")
     
     return src_batch, tgt_batch, control_samples
 
 
-def format_batch_given_alpha(src_batch, tgt_batch, alpha, filenames):
+def format_batch_for_mixing(src_batch, tgt_batch, alpha, mix_mode):
     
-    # We always want to generate motions of "source" identity
-    batch, model_kwargs = truebones_batch_collate(src_batch)
+    assert len(src_batch) == len(tgt_batch), "Source and target batches must have the same number of samples" # sanity check
+    bs = len(src_batch)
+    
+    merged_batch, merged_model_kwargs = truebones_batch_collate(src_batch + tgt_batch)
+    source_batch_shape = merged_batch[:bs].shape
+    model_kwargs = {
+        'y': {}, 
+        'control': MixConfig(x=torch.zeros_like(merged_batch), y={}, alpha=alpha, mix_mode=mix_mode),
+    }
 
-    # alpha [0.0] means control signal is fully driven by source motion itself
-    # NOTE: "source" always indicates the final skeleton topology we want to generate
+    def _format_val(v, mode):
+        """Helper to slice or interleave based on alpha mode"""
+        if mode == 'src': return v[:bs]
+        if mode == 'tgt': return v[bs:]
+        if torch.is_tensor(v) or isinstance(v, np.ndarray):
+            return rearrange(v, '(s b) ... -> (b s) ...', s=2)
+        return [item for pair in zip(v[:bs], v[bs:]) for item in pair]
+
+    # Determine Control Mode
     if alpha == 0.0:
-        model_kwargs['x_control'] = batch.unsqueeze(1) # only 1 control signal
-        model_kwargs['y_control'] = model_kwargs['y'] # same
-        curr_filenames = [(f[0], None) for f in filenames]
-
-    # alpha [1.0] means control signal (from the controlnet) is fully driven by target motion
-    # NOTE: if target skeleton is identical to source this is basically identical to alpha=0.0
-    #       HOWEVER, if target is different from source we're basically asking the model to perform motion retargeting
-    #       as the skeleton conditioning signal will be that of the source motion, but the controlnet signal is computed w.r.t target skeleton
+        ctrl_key = 'src'
+        model_kwargs['control'].x = merged_batch[:bs].unsqueeze(1)
     elif alpha == 1.0:
-        control_batch, control_model_kwargs = truebones_batch_collate(tgt_batch)
-        model_kwargs['x_control'] = control_batch.unsqueeze(1) # only 1 control signal
-        model_kwargs['y_control'] = control_model_kwargs['y'] # only target as control
-        curr_filenames = [(None, f[1]) for f in filenames]
-    
-
-    # for intermediate values we expect the model to perform motion mixing,
-    # NOTE: this consists in generating a motion that resebles "alpha" amount of target and "1-alpha" amount of source, 
-    #       this s.t. the output skeleton is "source", as always.
+        ctrl_key = 'tgt'
+        model_kwargs['control'].x = merged_batch[bs:].unsqueeze(1)
     else:
-        assert len(src_batch) == len(tgt_batch) # sanity check
-        for _ in range(len(src_batch)):
-            control_batch, control_model_kwargs = truebones_batch_collate(
-                # collate on the interleaved batch of sources and targets
-                [item for pair in zip(src_batch, tgt_batch) for item in pair]
-            ) 
-            model_kwargs['x_control'] = rearrange(
-                control_batch,
-                '(bs control) joint feats time -> bs control joint feats time',
-                bs=len(src_batch), control=2 # 2 control signals this time, source and target
-            )
-            model_kwargs['y_control'] = control_model_kwargs['y']
-        curr_filenames = filenames # [(source1, target1), (source2, target2), ...]
+        ctrl_key = 'interleave'
+        model_kwargs['control'].x = rearrange(merged_batch, '(s b) ... -> b s ...', s=2)
+
+    # Populate y and y_control
+    for k, v in merged_model_kwargs['y'].items():
+        model_kwargs['y'][k] = _format_val(v, 'src')
+        model_kwargs['control'].y[k] = _format_val(v, ctrl_key)
+
+    model_kwargs['control'].x = model_kwargs['control'].x.to(dist_util.dev())
     
-    # format the rest
-    model_kwargs['alpha'] = alpha
-    model_kwargs['x_control'] = model_kwargs['x_control'].to(dist_util.dev())
-    # .
-    return batch.shape, model_kwargs, curr_filenames
+    return source_batch_shape, model_kwargs
 
 if __name__ == "__main__":
     main()

@@ -73,18 +73,19 @@ class WandBPlatform(MLPlatform):
  
         # check if an experiment with the same id is already running
         api = wandb.Api()
-        project = kwargs.get('project', 'unnamed_project')
-        entity = kwargs.get('entity', 'unnamed_entity')
+        project = kwargs.get('project', os.getenv('WANDB_PROJECT', 'unnamed_project'))
+        entity = kwargs.get('entity', os.getenv('WANDB_ENTITY', 'unnamed_entity'))
         config = kwargs.get('config', None)
         runs = api.runs(path=f'{entity}/{project}')
         for run in runs:
-            # print(run.name, run.state)
+            #print(run.name, run.state)
             if run.name == self.name and run.state == 'running':
                 raise Exception(f'Experiment with name {self.name} is already running')
+        
         wandb.init(
             project=project,
             name=self.name,
-            id=self.name,  # in order to send continued runs to the same record
+            id=self.name,    # in order to send continued runs to the same record
             resume='allow',  # in order to send continued runs to the same record
             entity=entity,
             save_code=True,
